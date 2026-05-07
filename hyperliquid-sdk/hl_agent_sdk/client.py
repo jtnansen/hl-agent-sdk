@@ -40,8 +40,10 @@ class HyperliquidClient:
         secret_key: Optional[str] = None,
         account_address: Optional[str] = None,
         testnet: Optional[bool] = None,
+        cache_dir: Optional[str] = None,
     ) -> None:
         import os
+        from pathlib import Path
 
         self._secret_key = secret_key or os.environ.get("HL_SECRET_KEY", "")
         self._account_address = account_address or os.environ.get("HL_ACCOUNT_ADDRESS", "")
@@ -50,6 +52,11 @@ class HyperliquidClient:
             testnet = os.environ.get("HL_TESTNET", "0") == "1"
         self._testnet = testnet
         self._base_url = constants.TESTNET_API_URL if testnet else constants.MAINNET_API_URL
+
+        # Caching
+        if cache_dir is None:
+            cache_dir = os.environ.get("HL_CACHE_DIR") or str(Path.home() / ".cache" / "hl_agent_sdk")
+        self._cache_path = Path(cache_dir) / ("meta_testnet.json" if testnet else "meta_mainnet.json")
 
         self._wallet = None
         self._exchange: Optional[Exchange] = None
@@ -82,9 +89,36 @@ class HyperliquidClient:
     def _address(self) -> str:
         return self._account_address or self._get_wallet().address
 
-    def _meta_universe(self) -> list[dict]:
-        if self._meta_cache is None:
-            self._meta_cache = self._get_info().meta()["universe"]
+    def _meta_universe(self, force_refresh: bool = False) -> list[dict]:
+        import json
+        import time
+
+        if not force_refresh and self._meta_cache:
+            return self._meta_cache
+
+        # Try disk cache first
+        if not force_refresh and self._cache_path.exists():
+            try:
+                # Cache for 24 hours
+                if (time.time() - self._cache_path.stat().st_mtime) < 86400:
+                    with open(self._cache_path, "r") as f:
+                        self._meta_cache = json.load(f)
+                        return self._meta_cache
+            except Exception as e:
+                log.warning("Failed to read meta cache: %s", e)
+
+        # Fetch fresh
+        log.info("Fetching fresh metadata from Hyperliquid...")
+        self._meta_cache = self._get_info().meta()["universe"]
+
+        # Write to disk
+        try:
+            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._cache_path, "w") as f:
+                json.dump(self._meta_cache, f)
+        except Exception as e:
+            log.warning("Failed to write meta cache: %s", e)
+
         return self._meta_cache
 
     def _coin_names(self) -> list[str]:
